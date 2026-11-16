@@ -96,7 +96,32 @@ FROM ubuntu:26.04
 # -----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bubblewrap ca-certificates curl git ripgrep jq less procps openssl \
-    && rm -rf /var/lib/apt/lists/*
+    make postgresql \
+    && rm -rf /var/lib/apt/lists/* \
+    && for b in initdb pg_ctl postgres psql pg_isready createdb; do \
+         ln -sf /usr/lib/postgresql/*/bin/$b /usr/local/bin/$b; done
+
+# -----------------------------------------------------------------------------
+# Ferramentas de dev para os projetos (a imagem é o "host" do jail: o que não
+# estiver aqui não existe lá dentro).
+#   make .......... roda o Makefile do projeto (make test, make db-up...).
+#   postgresql .... servidor + cliente PostgreSQL (versão do Ubuntu da imagem).
+#                   Ninguém sobe banco aqui: o PROJETO decide (ex.: make db-up
+#                   inicia o servidor em 127.0.0.1 DENTRO do jail).
+#   ln -sf ... .... os binários do servidor ficam em /usr/lib/postgresql/<versão>/bin,
+#                   fora do PATH fixo do jail; os atalhos em /usr/local/bin
+#                   resolvem isso. O "*" acha a versão instalada.
+#   Go ............ versão estável mais recente como base. A versão de cada
+#                   projeto vem do go.mod (toolchain); com GOTOOLCHAIN=auto o Go
+#                   baixa a versão pedida pelo proxy.golang.org (liberado no jail).
+#                   Para fixar a base: troque a linha do GOV por  GOV=go1.25.4
+#   cgo / go test -race: acrescente "gcc libc6-dev" ao apt-get acima.
+# -----------------------------------------------------------------------------
+RUN GOV=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1) \
+    && curl -fsSL "https://go.dev/dl/${GOV}.linux-amd64.tar.gz" | tar xz -C /usr/local \
+    && ln -s /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
+    && go version
 
 # -----------------------------------------------------------------------------
 # RUN #2: instalar o ai-jail pelo método oficial "binário das GitHub Releases".
