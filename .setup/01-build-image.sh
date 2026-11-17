@@ -96,7 +96,7 @@ FROM ubuntu:26.04
 # -----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bubblewrap ca-certificates curl git ripgrep jq less procps openssl \
-    make postgresql \
+    make postgresql python3 \
     && rm -rf /var/lib/apt/lists/* \
     && for b in initdb pg_ctl postgres psql pg_isready createdb; do \
          ln -sf /usr/lib/postgresql/*/bin/$b /usr/local/bin/$b; done
@@ -122,6 +122,16 @@ RUN GOV=$(curl -fsSL 'https://go.dev/VERSION?m=text' | head -1) \
     && ln -s /usr/local/go/bin/go /usr/local/bin/go \
     && ln -s /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
     && go version
+
+# Python: python3 (apt) é a base; o uv cria o .venv de cada projeto e instala os
+# pacotes travados no uv.lock pelo PyPI (liberado no jail).
+#   UV_INSTALL_DIR=/usr/local/bin ... binário no PATH fixo do jail
+#   UV_NO_MODIFY_PATH=1 ............. não mexe no .bashrc do root
+#   /etc/uv/uv.toml ................. config em arquivo (o jail limpa o env);
+#                                     link-mode=copy evita aviso de hardlink
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh \
+    && mkdir -p /etc/uv && printf 'link-mode = "copy"\n' > /etc/uv/uv.toml \
+    && uv --version && python3 --version
 
 # -----------------------------------------------------------------------------
 # RUN #2: instalar o ai-jail pelo método oficial "binário das GitHub Releases".
