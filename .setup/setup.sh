@@ -21,9 +21,13 @@
 #                                  (este arquivo é "carregado", não executado).
 #   4  04-dry-run.sh               mostra o comando de sandbox que seria usado,
 #                                  sem iniciar o Claude (conferência final).
+#   5  05-git-identity.sh          grava user.name/user.email do git no volume
+#                                  claude-home (commits dentro do jail). Usa
+#                                  git-identity.env ou o git config do host.
+#                                  Se falhar, só avisa (não aborta o setup).
 #
 # USO
-#   ./setup.sh            roda os passos 1, 2, 3 e 4
+#   ./setup.sh            roda os passos 1, 2, 3, 4 e 5
 #   ./setup.sh 3          roda só o passo 3 (ex.: depois de um git pull)
 #   ./setup.sh 1 2        roda só os passos 1 e 2
 #   ./setup.sh -h         mostra esta ajuda
@@ -48,11 +52,11 @@ steps=()
 for a in "$@"; do
   case "$a" in
     -h|--help) usage; exit 0 ;;
-    1|2|3|4)   steps+=("$a") ;;
-    *) echo "argumento inválido: $a (use 1, 2, 3, 4 ou -h)" >&2; exit 2 ;;
+    1|2|3|4|5) steps+=("$a") ;;
+    *) echo "argumento inválido: $a (use 1, 2, 3, 4, 5 ou -h)" >&2; exit 2 ;;
   esac
 done
-[ ${#steps[@]} -gt 0 ] || steps=(1 2 3 4)
+[ ${#steps[@]} -gt 0 ] || steps=(1 2 3 4 5)
 
 has_step() { local s; for s in "${steps[@]}"; do [ "$s" = "$1" ] && return 0; done; return 1; }
 
@@ -124,6 +128,12 @@ fi
 if has_step 4; then
   say "Passo 4/4 — dry-run do ai-jail (só mostra o comando, não inicia o Claude)"
   ( cd "$DIR" && bash "$DIR/04-dry-run.sh" )
+fi
+
+# --- passo 5 (não fatal) -------------------------------------------------------
+if has_step 5; then
+  say "Passo 5/5 — identidade do git no volume claude-home"
+  bash "$DIR/05-git-identity.sh" || printf '\033[1;33mAVISO: passo 5 falhou; crie .setup/git-identity.env (veja o .example) e rode ./setup.sh 5\033[0m\n' >&2
 fi
 
 # --- fim -----------------------------------------------------------------------
