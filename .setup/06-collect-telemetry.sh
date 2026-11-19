@@ -22,9 +22,9 @@
 #     DEST/repos.tsv    caminho, workspace, projeto e pasta de histórico.
 #
 #   ATENÇÃO
-#     - O servidor ai-memory é PARADO por alguns segundos (para o banco não ser
-#       copiado no meio de uma escrita) e religado no fim. Feche os claude-box
-#       abertos antes de rodar.
+#     - O backup e o export do ai-memory são pedidos AO SERVIDOR (ele precisa
+#       estar no ar; o script o liga se estiver parado). Nada é parado: parar o
+#       ai-memory-server derruba a rede de todos os claude-box abertos.
 #     - Os arquivos têm suas conversas inteiras e o config.toml do ai-memory.
 #       O script NÃO confere o .gitignore: o destino pode ir para um repo
 #       privado. Quem publicar assume o risco (veja a conversa sobre segurança).
@@ -87,7 +87,7 @@ if [ "$DRY" -eq 1 ]; then
   say "Dry-run: nada foi copiado nem parado"
   printf '  copiaria do claude-home: %s\n' "${paths[@]}"
   echo "  destino: $DEST"
-  echo "  ai-memory: parar $SERVER, 1 backup + 1 export-okf por projeto, religar"
+  echo "  ai-memory: 1 backup + 1 export-okf por projeto, pedidos ao servidor (nada é parado)"
   exit 0
 fi
 
@@ -101,27 +101,29 @@ docker run --rm -u 1000 -v claude-home:/home/dev:ro "$IMAGE" \
   tar cf - -C /home/dev/.claude "${paths[@]}" | tar xf - -C "$DEST/claude"
 printf '%s\n' "${repos[@]}" | tr '|' '\t' > "$DEST/repos.tsv"
 
-# --- 5. ai-memory: backup + export por projeto (servidor parado) ---------------
+# --- 5. ai-memory: backup + export por projeto (pedidos ao servidor) -----------
 say "Exportando o ai-memory"
 stamp=$(date +%Y%m%d-%H%M%S)
-was_running=$(docker inspect -f '{{.State.Running}}' "$SERVER" 2>/dev/null || echo false)
-restart() { if [ "$was_running" = true ]; then docker start "$SERVER" >/dev/null 2>&1 || warn "não consegui religar $SERVER: rode docker start $SERVER"; fi; }
-if [ "$was_running" = true ]; then docker stop "$SERVER" >/dev/null; trap restart EXIT; fi
+[ -f "$HOME/.claude-box-token" ] || fail "token do ai-memory não encontrado (~/.claude-box-token)."
+export AI_MEMORY_AUTH_TOKEN="$(cat "$HOME/.claude-box-token")"
+if [ "$(docker inspect -f '{{.State.Running}}' "$SERVER" 2>/dev/null || echo false)" != true ]; then
+  docker start "$SERVER" >/dev/null 2>&1 || fail "não consegui ligar $SERVER."
+  sleep 3
+fi
 
-mem() {  # $1 = comando ai-memory; roda como root (dono do volume) e devolve a posse ao seu usuário
+mem() {  # $1 = comando ai-memory, executado na rede do servidor (127.0.0.1:49374)
   local out rc=0
-  out=$(docker run --rm -u 0 -v ai-memory-data:/data -v "$DEST/ai-memory":/out "$IMAGE" \
-    sh -c "$1 && chown -R $(id -u):$(id -g) /out" 2>&1) || rc=$?
+  out=$(docker run --rm --user "$(id -u):$(id -g)" --network "container:$SERVER" \
+    -e AI_MEMORY_AUTH_TOKEN -v "$DEST/ai-memory":/out "$IMAGE" sh -c "$1" 2>&1) || rc=$?
   printf '%s\n' "$out" | grep -v ' INFO ' || true
   return "$rc"
 }
-mem "ai-memory backup --data-dir /data --to /out/backup-$stamp.tar.gz" || warn "backup do banco falhou"
+mem "ai-memory backup --to /out/backup-$stamp.tar.gz" || warn "backup do banco falhou"
 while IFS='|' read -r ws pj; do
-  mem "ai-memory export-okf --data-dir /data --workspace $ws --project $pj --to /out/okf-$ws-$pj.tar.gz" \
+  mem "ai-memory export-okf --workspace $ws --project $pj --to /out/okf-$ws-$pj.tar.gz" \
     || warn "export-okf falhou para $ws/$pj"
 done < <(printf '%s\n' "${repos[@]}" | cut -d'|' -f2,3 | sort -u)
 
-restart; trap - EXIT
 find "$DEST/ai-memory" -type f -exec chmod 600 {} + || warn "não consegui ajustar as permissões dos pacotes"
 
 # --- 6. resumo -----------------------------------------------------------------
