@@ -57,7 +57,7 @@
 #
 # =============================================================================
 
-docker build -t claude-box - <<'EOF'
+docker build --build-arg INSTALL_OLLAMA="${CLAUDE_BOX_INSTALL_OLLAMA:-0}" -t claude-box - <<'EOF'
 # -----------------------------------------------------------------------------
 # FROM: a imagem-base. Tudo abaixo é construído em cima dela.
 #   ubuntu:26.04 é a imagem OFICIAL do Ubuntu 26.04 LTS ("resolute").
@@ -96,7 +96,7 @@ FROM ubuntu:26.04
 # -----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bubblewrap ca-certificates curl git ripgrep jq less procps openssl \
-    make postgresql python3 \
+    make postgresql python3 zstd \
     && rm -rf /var/lib/apt/lists/* \
     && for b in initdb pg_ctl postgres psql pg_isready createdb; do \
          ln -sf /usr/lib/postgresql/*/bin/$b /usr/local/bin/$b; done
@@ -241,6 +241,28 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 #        (o "--yolo") rodando como root. Precisa ser usuário comum.
 # -----------------------------------------------------------------------------
 RUN userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -s /bin/bash dev && mkdir -p /workspace && chown dev:dev /workspace
+
+# -----------------------------------------------------------------------------
+# RUN #5b: Ollama OPCIONAL (só para "claude-box --local"). Padrão: NÃO instala.
+#   ARG INSTALL_OLLAMA=0 ... 1 instala; 0 deixa a imagem sem Ollama. Vem do
+#                            setup.sh (--local-yes / --local-no) ou do
+#                            "claude-box --install-local" pela variável
+#                            CLAUDE_BOX_INSTALL_OLLAMA no docker build.
+#   zstd ................... o instalador baixa um pacote .tar.zst (já vem no apt principal, ~1 MB).
+#   curl ... | sh .......... instalador oficial do Ollama. Dentro do container não
+#                            há systemd: o aviso de que o serviço não foi criado
+#                            é esperado.
+#   /ollama-models ......... pasta dos modelos. Existe na imagem com dono "dev"
+#                            para o volume nomeado "ollama-models" herdar esse dono.
+#   command -v ollama ...... faz o build falhar se o binário não foi instalado.
+#   Com INSTALL_OLLAMA=0 o RUN não faz nada (camada vazia, quase instantânea).
+# -----------------------------------------------------------------------------
+ARG INSTALL_OLLAMA=0
+RUN if [ "$INSTALL_OLLAMA" = "1" ]; then \
+      curl -fsSL https://ollama.com/install.sh | sh \
+      && command -v ollama \
+      && mkdir -p /ollama-models && chown dev:dev /ollama-models; \
+    fi
 
 # -----------------------------------------------------------------------------
 # USER dev: a partir daqui (e quando o container rodar) o usuário padrão é

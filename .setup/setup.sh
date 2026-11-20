@@ -52,8 +52,10 @@ steps=()
 for a in "$@"; do
   case "$a" in
     -h|--help) usage; exit 0 ;;
+    --local-yes) export CLAUDE_BOX_INSTALL_OLLAMA=1 ;;
+    --local-no)  export CLAUDE_BOX_INSTALL_OLLAMA=0 ;;
     1|2|3|4|5) steps+=("$a") ;;
-    *) echo "argumento inválido: $a (use 1, 2, 3, 4, 5 ou -h)" >&2; exit 2 ;;
+    *) echo "argumento inválido: $a (use 1, 2, 3, 4, 5, --local-yes, --local-no ou -h)" >&2; exit 2 ;;
   esac
 done
 [ ${#steps[@]} -gt 0 ] || steps=(1 2 3 4 5)

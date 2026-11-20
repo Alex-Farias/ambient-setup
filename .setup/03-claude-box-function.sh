@@ -119,11 +119,12 @@ _claude_box_server_up() {
     # --memory 1g   teto de 1 GB de RAM (protege seus 8 GB).
     --memory 1g
 
-    # -p 127.0.0.1:49374:49374
-    #     Publica a porta SÓ no loopback do seu PC (IP:PORTA_HOST:PORTA_CONTAINER).
-    #     Serve para abrir http://127.0.0.1:49374/web no navegador. Os containers
-    #     de projeto NÃO dependem desta publicação.
-    -p 127.0.0.1:49374:49374
+    # (sem -p) Por padrão NENHUMA porta do servidor é publicada no seu PC. Os
+    #     containers de projeto falam com ele pela rede compartilhada
+    #     (--network container:...), então não precisam de porta no host. Isso
+    #     evita expor o servidor e evita conflito com outro serviço que já use a
+    #     49374 (um servidor de memória de outro projeto deixou este container
+    #     sem rede). Para abrir a interface web, veja CLAUDE_BOX_WEB_PORT abaixo.
 
     # -v ai-memory-data:/data
     #     Volume nomeado com banco, wiki e modelos. Sobrevive a recriar o container.
@@ -134,6 +135,12 @@ _claude_box_server_up() {
     #     loopback, se recusa a subir sem token; o log mostrou "auth=true").
     -e AI_MEMORY_AUTH_TOKEN="$TOKEN"
   )
+
+  # CLAUDE_BOX_WEB_PORT (opcional): publica a interface web SÓ no loopback do PC
+  #   (127.0.0.1, nunca na rede). Exemplo, ao CRIAR o servidor:
+  #       docker rm -f ai-memory-server; CLAUDE_BOX_WEB_PORT=49375 claude-box --mcp-setup
+  #   e abra http://127.0.0.1:49375/web . Escolha uma porta livre.
+  [ -n "${CLAUDE_BOX_WEB_PORT:-}" ] && server_flags+=( -p "127.0.0.1:${CLAUDE_BOX_WEB_PORT}:49374" )
 
   # docker inspect NOME >/dev/null 2>&1 || docker run ...
   #   inspect sai com sucesso se o container existe; >/dev/null 2>&1 esconde a
@@ -237,6 +244,23 @@ _claude_box_status() {
   docker run --rm --user 1000:1000 -w /home/dev -v claude-home:/home/dev claude-box claude auth status --text
 }
 
+# -----------------------------------------------------------------------------
+# _claude_box_install_local  —  instala o Ollama numa imagem claude-box já existente
+# -----------------------------------------------------------------------------
+#   Reconstrói a imagem com INSTALL_OLLAMA=1 usando o 01-build-image.sh que está ao
+#   lado deste arquivo. As camadas anteriores vêm do cache do Docker; só a camada do
+#   Ollama é refeita (baixa uns 2,4 GB). Os modelos do volume ollama-models não são
+#   tocados. Para voltar à imagem sem Ollama: ./setup.sh 1 (padrão --local-no).
+_claude_box_install_local() {
+  local dir; dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [ ! -f "$dir/01-build-image.sh" ]; then
+    echo "claude-box --install-local: não achei 01-build-image.sh ao lado do 03 ($dir)." >&2
+    return 1
+  fi
+  echo "claude-box: reconstruindo a imagem COM Ollama (só a camada do Ollama é refeita)."
+  CLAUDE_BOX_INSTALL_OLLAMA=1 bash "$dir/01-build-image.sh"
+}
+
 
 # -----------------------------------------------------------------------------
 # claude-box  —  a função principal
@@ -257,7 +281,21 @@ claude-box() {
     --mcp-setup)   _claude_box_mcp_setup;   return $? ;;
     --login)       _claude_box_login;       return $? ;;
     --status)      _claude_box_status;      return $? ;;
+    --install-local) _claude_box_install_local; return $? ;;
   esac
+
+  # --local (opcional): usa o Ollama na GPU como backend do Claude. Sem a flag,
+  # nada abaixo muda o comportamento normal. Só vale como PRIMEIRO argumento.
+  local use_local=0
+  if [ "${1:-}" = "--local" ]; then use_local=1; shift; fi
+  # A imagem precisa ter o Ollama (instalado por --local-yes ou --install-local).
+  # Com CLAUDE_BOX_OLLAMA_URL (Ollama externo) a imagem não precisa dele.
+  if [ "$use_local" = 1 ] && [ -z "${CLAUDE_BOX_OLLAMA_URL:-}" ]; then
+    if ! docker run --rm --user 1000:1000 claude-box sh -c 'command -v ollama' >/dev/null 2>&1; then
+      echo "claude-box --local: esta imagem não tem o Ollama. Rode: claude-box --install-local" >&2
+      return 1
+    fi
+  fi
 
   local TOKEN; TOKEN=$(_claude_box_token)
   _claude_box_server_up
@@ -372,6 +410,72 @@ claude-box() {
   local -a extra_jail=( ${CLAUDE_BOX_JAIL_FLAGS:-} )
 
   # ---------------------------------------------------------------------------
+  # MODO --local: Ollama na GPU como backend (só entra se use_local=1).
+  #   CLAUDE_BOX_LOCAL_MODEL ....... modelo (padrão qwen3:8b); baixado sozinho se faltar
+  #   CLAUDE_BOX_LOCAL_KEEP_ALIVE .. tempo com o modelo na VRAM (padrão 2m, p/ liberar a GPU)
+  #   CLAUDE_BOX_LOCAL_CTX ......... contexto (padrão 32768; o Claude Code precisa de contexto grande)
+  #   CLAUDE_BOX_OLLAMA_URL ........ PONTO DE EXTENSÃO: se definida, NÃO sobe Ollama interno e
+  #                                  usa esta URL (libere o host em CLAUDE_BOX_JAIL_FLAGS).
+  # Como funciona: o ollama serve roda no container, FORA do ai-jail (a GPU não vai
+  # para o jail: no_gpu continua valendo). O jail alcança 127.0.0.1:11434 pelo mesmo
+  # --forward-port já usado no ai-memory; o ai-jail e o ai-memory continuam ativos.
+  # ---------------------------------------------------------------------------
+  # ISOLAMENTO: o --local não toca em nada do modo normal.
+  #   --project "<projeto>-local" ... projeto próprio no ai-memory (mesmo servidor). A
+  #       "workstream atual" fica no servidor, por projeto: num projeto separado, o que o
+  #       claude-box normal retoma nunca muda.
+  #   --claude-dir ~/.claude-local .. config própria do Claude (sessões, settings,
+  #       .claude.json). O modelo local nunca entra no ~/.claude do modo normal.
+  #   --harness claude .............. com flags antes de "claude", o ai-jail não reconhece
+  #       o harness sozinho; sem isto ele não monta a config do Claude.
+  local model="" ollama_url="" local_boot="" local_proj=""
+  local -a pre=()
+  if [ "$use_local" = 1 ]; then
+    model="${CLAUDE_BOX_LOCAL_MODEL:-qwen3:8b}"
+    local_proj=$(sed -n 's/^project *= *"\(.*\)"/\1/p' .ai-memory.toml 2>/dev/null | head -1)
+    local_proj="${local_proj:-$(basename "$PWD")}-local"
+    ollama_url="${CLAUDE_BOX_OLLAMA_URL:-}"
+    # --memory repetido: vale o último; o Ollama carrega o modelo dentro deste container.
+    run_flags+=( --memory "${CLAUDE_BOX_MEM:-6g}" -e ANTHROPIC_AUTH_TOKEN=ollama -e ANTHROPIC_API_KEY= )
+    jail_flags+=( --harness claude --claude-dir /home/dev/.claude-local --env ANTHROPIC_BASE_URL --env ANTHROPIC_AUTH_TOKEN --env ANTHROPIC_API_KEY )
+    if [ -n "$ollama_url" ]; then
+      run_flags+=( -e ANTHROPIC_BASE_URL="$ollama_url" )
+      pre=( sh -c 'mkdir -p /home/dev/.claude-local && exec "$@"' claude-box-local )
+    else
+      run_flags+=(
+        --gpus all
+        -v ollama-models:/ollama-models
+        -e OLLAMA_MODELS=/ollama-models
+        -e OLLAMA_KEEP_ALIVE="${CLAUDE_BOX_LOCAL_KEEP_ALIVE:-2m}"
+        -e OLLAMA_CONTEXT_LENGTH="${CLAUDE_BOX_LOCAL_CTX:-32768}"
+        -e ANTHROPIC_BASE_URL=http://127.0.0.1:11434
+      )
+      jail_flags+=( --forward-port 11434 )
+      # Roda no container (fora do jail): sobe o servidor, espera responder (até 60 s),
+      # baixa o modelo se faltar e então troca de processo para o ai-jail (exec).
+      local_boot=$(cat <<'EOS'
+model=$1; shift
+ollama serve >/tmp/ollama.log 2>&1 &
+i=0
+until curl -fs http://127.0.0.1:11434/api/version >/dev/null 2>&1; do
+  i=$((i+1))
+  if [ "$i" -gt 60 ]; then
+    echo "claude-box --local: o Ollama não respondeu em 60 s. Fim do log:" >&2
+    tail -20 /tmp/ollama.log >&2
+    exit 1
+  fi
+  sleep 1
+done
+ollama show "$model" >/dev/null 2>&1 || ollama pull "$model" || exit 1
+mkdir -p /home/dev/.claude-local
+exec "$@"
+EOS
+)
+      pre=( sh -c "$local_boot" claude-box-local "$model" )
+    fi
+  fi
+
+  # ---------------------------------------------------------------------------
   # LINHA FINAL:
   #   docker run RUN_FLAGS claude-box ai-jail JAIL_FLAGS EXTRA ai-memory run --yolo claude "$@"
   #
@@ -386,7 +490,11 @@ claude-box() {
   #   Ao sair do Claude, o ai-memory mostra "r) run claude again / q) quit
   #   (default)": Enter ou q encerra; r reinicia o Claude no mesmo jail.
   # ---------------------------------------------------------------------------
-  docker run "${run_flags[@]}" claude-box ai-jail "${jail_flags[@]}" "${extra_jail[@]}" ai-memory run --yolo claude "$@"
+  if [ "$use_local" = 1 ]; then
+    docker run "${run_flags[@]}" claude-box ${pre[@]+"${pre[@]}"} ai-jail "${jail_flags[@]}" "${extra_jail[@]}" ai-memory run --yolo --project "$local_proj" claude --model "$model" "$@"
+  else
+    docker run "${run_flags[@]}" claude-box ai-jail "${jail_flags[@]}" "${extra_jail[@]}" ai-memory run --yolo claude "$@"
+  fi
 }
 
 
